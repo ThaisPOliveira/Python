@@ -1,0 +1,93 @@
+def conference_sessions(self):
+    divergences_lines = []
+    approved_lines = []
+    sessions = self.env.context.get('active_ids', [])
+
+    if len(sessions) != 2:
+        raise UserError("A conferência só pode ser realizada por duas sessões.")
+
+    counting_session = self.env['stock.count.session'].browse(sessions).filtered(lambda s: s.type == 'counting')
+    recounting_session = self.env['stock.count.session'].browse(sessions).filtered(lambda s: s.type == 'recounting')
+
+    if not counting_session or not recounting_session:
+        raise UserError("Apenas sessões (contagem e recontagem) devem ser selecionadas.")
+
+    if counting_session.location_id != recounting_session.location_id:
+        raise UserError("O local pai das sessões de contagem e recontagem deve ser o mesmo.")
+
+    if (counting_session.session_status not in ['waiting_for_comparision', 'pending'] or
+            recounting_session.session_status not in ['waiting_for_comparision', 'pending']):
+        raise UserError(
+            "Só é possível comparar sessões finalizadas e com status 'Aguardando comparação' ou 'Pendência'."
+        )
+
+    for counting_line in counting_session.line_ids:
+        recounting_line = recounting_session.line_ids.filtered(
+            lambda l: l.location_id == counting_line.location_id and l.product_id == counting_line.product_id
+        )
+
+        if recounting_line:
+            recounting_line = recounting_line[0]
+            if counting_line.product_qty == recounting_line.product_qty:
+                counting_line.line_status = 'approved'
+                recounting_line.line_status = 'approved'
+                approved_lines.append(counting_line)
+            else:
+                counting_line.line_status = 'quantity_pending'
+                recounting_line.line_status = 'quantity_pending'
+                divergences_lines.append(counting_line)
+        else:
+            counting_line.line_status = 'location_pending'
+            divergences_lines.append(counting_line)
+
+    conference_session_divergence = None
+    conference_session_approved = None
+
+    # Criar uma sessão para as divergências
+    if divergences_lines:
+        conference_session_divergence = self.env['conference.session'].create({
+            'session_ids': [(6, 0, sessions)],
+            'location_id': counting_session.location_id.id
+        })
+
+        for line in divergences_lines:
+            self.env['conference.line'].create({
+                'conference_line': conference_session_divergence.id,
+                'product_id': line.product_id.id,
+                'location_id': line.location_id.id,
+                'product_qty': line.product_qty,
+                'status': line.line_status
+            })
+
+    # Criar uma sessão para os aprovados
+    if approved_lines:
+        conference_session_approved = self.env['conference.session'].create({
+            'session_ids': [(6, 0, sessions)],
+            'location_id': counting_session.location_id.id
+        })
+
+        for line in approved_lines:
+            self.env['conference.line'].create({
+                'conference_line': conference_session_approved.id,
+                'product_id': line.product_id.id,
+                'location_id': line.location_id.id,
+                'product_qty': line.product_qty,
+                'status': line.line_status
+            })
+
+    # Retornar a ação para visualizar a conferência das divergências ou aprovados
+    action = {
+        'type': 'ir.actions.act_window',
+        'res_model': 'conference.session',
+        'view_mode': 'form',
+        'view_id': self.env.ref('stock_count.view_conference_session_form').id,
+        'target': 'new',
+        'context': {
+            'default_divergences': [line.id for line in conference_session_divergence.divergence_ids] if conference_session_divergence else [],
+            'default_approved_lines': [line.id for line in conference_session_approved.divergence_ids] if conference_session_approved else [],
+            'default_session_ids': sessions,
+            'default_location_id': counting_session.location_id.id
+        },
+    }
+
+    return action
